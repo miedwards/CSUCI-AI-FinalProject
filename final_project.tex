@@ -1,0 +1,194 @@
+\documentclass{article}
+\usepackage[usenames,dvipsnames]{pstricks}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{mathrsfs}
+\usepackage{pst-grad} % For gradients
+\usepackage{pst-plot} % For axes
+\usepackage{subcaption}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{url}
+
+\pagestyle{fancy}
+\lhead{COMP 569}
+\chead{Mark I. Edwards}
+\rhead{Final Project}
+
+\title{COMP 569 Final Project\\Image Recognition on Busy Images with Convolutional Neural Networks}
+\author{Mark I. Edwards}
+
+\begin{document}
+\maketitle
+\abstract{Convolutional Neural Networks (CNNs) are one of the most up-and coming
+image recognition algorithm. In this project, I aim to use CNNs to perform image
+recognition on busy images, locating small targets in images containing many
+background patterns. I do this by replicating the work in~\cite{saito_2016} and
+use and use CNNs to perform image recognition on aerial images of vehicles.}
+
+\section*{Introduction}
+Image recognition on busy images can be thought of as the task of teaching
+computers to play Where's Waldo.\textsuperscript{TM} It is the task of teaching computers to
+identify faces within a crowd, to identify animals within a landscape, or to
+identify cars, buildings and roads in an aerial image. In this project, the
+author examines the task of identifying cars within aerial images, using the
+Vehicle Detection in Aerial Imagery (VEDAI) dataset~\cite{vedai_2015}.
+
+\section*{Background}
+Prior to the rise of Convolutional Neural Networks, a number of other approaches
+were used to perform image recognition on busy images. One such method was known
+as template matching. Some templates extract features, such as edges, curves or
+points, and others consist of small pixel areas that are compared to patches
+within the image containing the target to be matched with some similarity
+measure~\cite{perveen_2013}. Such rudimentary learning methods and other expert
+systems were popular through the 1960s and 1070s~\cite{minh_thesis}.
+
+Starting in the 1980s, simple machine learning classifiers gained
+popularity~\cite{minh_thesis}. One of the most popular machine learning
+algorithms used for analyzing aerial images was the Naive Bayes classifier.
+Early approaches attempted to classify every pixel $i$ into a class $c+i$ in the
+input image based on local features $x_i$. The primary drawback of this is that
+it requires that we specify the class-conditional distribution $p(x_i \mid c_i =
+k)$ for each class $k$. The multivariate normal distribution is typically used,
+but this limits the classifier to only linear or quadratic decision boundaries.
+Neural Networks rose as an alternative to Bayesian models as they can
+approximate the class-conditional distribution as a differentiable function with
+learned parameters, both eliminating the restriction on decision boundaries and
+the requirement that the class-conditional distribution be explicitly found. 
+
+Another method that gained traction was the use of machine learning
+``ensembles.'' Machine learning ensembles combine multiple machine learning
+models, typically either through Boosting or Averaging. Boosting is the process
+of using multiple weak machine learning algorithms in succession, to gradually
+refine results. A common boosting algorithm is the AdaBoost ``Adaptive
+Boosting'' method, which integrates multiple Tree learning algorithms in
+succession. AdaBoost is itself a stage within one of the best known image
+recognition algorithms, the Viola-Jones algorithm. An averaging algorithm
+instead uses multiple weak classifiers in parallel, averaging the output. One
+example of a commonly used averaging algorithm is the Random Forest method. In
+the Random Forest method, multiple decision trees are trained on randomly
+selected subsets of the training data taken with replacement using a random
+subset of features in a process known as ``Bagging.'' The predictions of the
+different trees are then averaged to get the final result. The random forest
+algorithm has shown considerable success at detecting brain tumors within
+MRI scans~\cite{brats}.
+
+To improve further upon the successes of ensemble methods the authors
+of~\cite{saito_2016} have turned to Neural Networks. Deep Neural Networks
+have a structure that effectively performs boosting and averaging on
+neurons following the perceptron algorithm. In particular, Convolutional Neural
+Networks (CNNs) have shown considerable prowess at image detection.
+
+\section*{Convolutional Neural Networks}
+Neural Networks are a paradigm inspired by the function of the biological brain.
+Artificial Neurons simulate the function of biological neurons using a
+weighted sum of their inputs and an activation function $f$ as shown
+in Figure~\ref{fig:bioArtNeuron} and Figure~\ref{fig:activation}.
+\begin{figure}[h]
+\centering
+\caption{Biological and Artificial Neurons}
+\includegraphics[width=0.99\textwidth]{./biological_artificial_neurons.png}
+\label{fig:bioArtNeuron}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\caption{Activation Functions}
+\includegraphics[width=0.99\textwidth]{./activation.png}
+\label{fig:activation}
+\end{figure}
+
+However, individual neurons are only capable of categorization along linear
+boundaries. In order to achieve the non-linearity needed for more accurate
+predictions, multiple neurons must be connected into a network as shown in
+Figure~\ref{fig:neuralNetwork}. In fact, a sufficiently large Neural Network can
+approximate any continuous function on compact subsets of
+$\mathbb{R}^n$~\cite{hornik_1991}.
+
+\begin{figure}[h]
+\centering
+\caption{Neural Network}
+\includegraphics[width=0.5\textwidth]{./neural_network.png}
+\label{fig:neuralNetwork}
+\end{figure}
+
+However, fully connected Deep Neural Networks are computationally inefficient
+and prone to overfitting. This is because in a fully connected neural network,
+each neuron in the first hidden layer (the layer after the input layer) receives
+information about each pixel in the image, which is often computatationally
+untenable and extraneous. Convolutional Neural Networks employ ``spatial
+sparsity'' in the form of convolutional layers. 
+
+\begin{figure}[h]
+\centering
+\caption{Convolution}
+\includegraphics[width=0.5\textwidth]{./conv_diagram.png}
+\label{fig:kernel}
+\end{figure}
+
+In the field of Image Processing, the word convolution or kernel refers to a linear
+operation that takes place over a small region within a larger image as shown in
+Figure~\ref{fig:kernel}. In a convolutional neural network, such convolutions
+take the form of connections within the network corresponding to a region. In
+essence, the convolutions are learned rather than pre-determined. 
+
+Typically, CNNs employ multiple learned convolutions in their convolutional
+layers. This results in much more data than the original input, which adds to
+memory and processing costs. Since some of this data is extraneous, a form of
+sub-sampling called ``pooling'' is often employed. One popular form of pooling is
+``max pooling.'' In max pooling, many small spatial regions of the output of
+multiple convolutions are selected. From these regions, only the largest value
+is kept. This reduces computational cost and reduces overfitting, without much
+loss of information.
+
+\begin{figure}[h!]
+\centering
+\caption{Minh Net}
+\includegraphics[width=0.99\textwidth]{./MinhNet.png}
+\label{fig:minh}
+\end{figure}
+
+The exact CNN used in this project is shown in Figure~\ref{fig:minh}. It was
+developed in~\cite{saito_2016} with inspiration from~\cite{minh_thesis}. It employs a
+large initial convolution that allows it to closely match small targets. It was
+originally applied to the Massachusetts Roads Dataset and the Massachusetts
+Buildings Dataset. However, the author of this project was unable to access
+those databases, and instead used the Vehicle Detection in Aerial Imagery (VEDAI)
+dataset~\cite{vedai_2015}. In addition, many training methods implemented
+within~\cite{saito_2016} were not implemented, such as model averaging over
+spatial displacement, to account for small changes in target position, and data
+augmentation by randomly rotating the input images. As implemented, this CNN
+takes a $512 \times 512$ 3 color image as input, and outputs a $16\times 16$
+grid with a pixel depth equal to one more than the number of classifications (an
+additional background classification).
+
+
+\newpage
+%\medskip
+%\begin{thebibliography}{9}
+%\bibitem{lifeofsun}
+% \bibitem{latexcompanion} 
+% Michel Goossens, Frank Mittelbach, and Alexander Samarin. 
+% \textit{The \LaTeX\ Companion}. 
+% Addison-Wesley, Reading, Massachusetts, 1993.
+%  
+% \bibitem{einstein} 
+% Albert Einstein. 
+% \textit{Zur Elektrodynamik bewegter K{\"o}rper}. (German) 
+% [\textit{On the electrodynamics of moving bodies}]. 
+% Annalen der Physik, 322(10):891–921, 1905.
+%  
+% \bibitem{knuthwebsite} 
+% Knuth: Computers and Typesetting,
+% \\\texttt{http://www-cs-faculty.stanford.edu/\~{}uno/abcde.html}
+%\end{thebibliography}
+\bibliographystyle{acm}
+\bibliography{final_project}
+
+
+\end{document}

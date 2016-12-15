@@ -39,10 +39,12 @@ IMAGE_SIZE = 512
 OUTPUT_RESOLUTION = 16
 NUM_CHANNELS = 3 # Number of color channels
 PIXEL_DEPTH = 255 # Color depth
-NUM_LABELS = 10 # The number of detectable objects + 1 background label
+NUM_LABELS = 2 # The number of detectable objects + 1 background label
+# The vedai has a maximum of 11 detectable objects ranging from 1 to 31,
+# but this only locates for now. That is, it groups them all into 1 catagory
 SEED = 66478  # Set to None for random seed.
 BATCH_SIZE = 64
-NUM_EPOCHS = 10
+NUM_EPOCHS = 1
 EVAL_BATCH_SIZE = 64
 EVAL_FREQUENCY = 100  # Number of steps between evaluations.
 FC_DROPOUT = 0.5
@@ -65,6 +67,12 @@ def data_type():
     else:
       return tf.float32
 
+def np_data_type():
+    "Return the numpy data type."
+    if FLAGS.use_fp16:
+        return numpy.float16
+    else:
+        return numpy.float32
 
 def fake_data(num_images):
     """Generate a fake dataset that matches the preset dimensions."""
@@ -96,7 +104,11 @@ class MnihCNN: # Named for Volodymyr Mnih who developed this architecture
         self.train_data_node = tf.placeholder(
                 data_type(),
                 shape=(BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS))
-        self.train_labels_node = tf.placeholder(tf.int64, shape=(BATCH_SIZE,))
+        self.train_labels_node = tf.placeholder(tf.int64,
+                                shape=(BATCH_SIZE,
+                                       OUTPUT_RESOLUTION,
+                                       OUTPUT_RESOLUTION,
+                                       NUM_LABELS))
         self.eval_data = tf.placeholder(
                 data_type(),
                 shape=(EVAL_BATCH_SIZE, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS))
@@ -134,35 +146,39 @@ class MnihCNN: # Named for Volodymyr Mnih who developed this architecture
                                                     dtype=data_type()))
         self.fc2_biases = tf.Variable(tf.constant(
             0.1, shape=[num_output_neurons], dtype=data_type()))
-        # Channelwise inhibited
-
-    def extract_data(filepath):
-        """Extract the images into a tensor [image index, y, x, channels].
-        Values are rescaled from [0, 255] down to [-0.5, 0.5].
-        """
-        filenames = glob.iglob(filepath)
-        for filename in filenames:
-            print('Extracting', filename)
-            with Image.open(filename) as input_img:
-                input_img.resize((IMAGE_SIZE, IMAGE_SIZE))
-                img_data = numpy.array(input_img.getdata(),
-                                       numpy.uint8).reshape(input_img.size[1], input_img.size[0], 3)
-                img_data = (img_data - (PIXEL_DEPTH / 2.0)) / PIXEL_DEPTH
-
-        img_data = img_data.reshape(num_images, IMAGE_SIZE, IMAGE_SIZE, NUM_CHANNELS)
-        return img_data
-
-    def extract_labels(filepath):
-        """Extract the labels into a vector of int64 label IDs."""
-        filenames = glob.iglob(filepath)
-        print('Extracting', filepath)
-        for filename in filenames:
-            with open(filename) as lablefile:
-                pass
-        return None
+        # Minh net can be improved using channel inhibeting, but
+        # this is not yet implemented.
+        # Training computation: logits + cross-entropy loss.
+        self.logits = self.model(self.train_data_node, True)
+        self.loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
+                                    self.logits, self.train_labels_node))
+        # L2 regularization for the fully connected parameters.
+        self.regularizers = (tf.nn.l2_loss(self.fc1_weights) + tf.nn.l2_loss(self.fc1_biases) +
+                            tf.nn.l2_loss(self.fc2_weights) + tf.nn.l2_loss(self.fc2_biases))
+        # Add the regularization term to the loss.
+        self.loss += 5e-4 * self.regularizers
+        # Optimizer: set up a variable that's incremented once per batch and
+        # controls the learning rate decay.
+        self.batch = tf.Variable(0, dtype=data_type())
+        # Decay once per epoch, using an exponential schedule starting at 0.01.
+        self.learning_rate = tf.train.exponential_decay(
+            0.01,                # Base learning rate.
+            self.batch * BATCH_SIZE,  # Current index into the dataset.
+            1100,                # Decay step. TODO FIXME
+            0.95,                # Decay rate.
+            staircase=True)
+        # Use simple momentum for the optimization.
+        self.optimizer = tf.train.MomentumOptimizer(self.learning_rate,
+                                                0.9).minimize(self.loss,
+                                                    global_step=self.batch)
+        # Predictions for the current training minibatch.
+        self.train_prediction = tf.nn.softmax(self.logits)
+        # Predictions for the test and validation, which we'll compute less often.
+        self.eval_prediction = tf.nn.softmax(model(self.eval_data))
 
     def model(self, data, train=False):
         """The Model definition."""
+        print(data.get_shape())
         # 2D convolution, with 'SAME' padding (i.e. the output feature map has
         # the same size as the input). Note that {strides} is a 4D array whose
         # shape matches the data layout: [image index, y, x, depth].
@@ -196,136 +212,101 @@ class MnihCNN: # Named for Volodymyr Mnih who developed this architecture
                 [relu_shape[0], relu_shape[1] * relu_shape[2] * relu_shape[3]])
         # Fully connected layer. Note that the '+' operation automatically
         # broadcasts the biases.
+        print("Pre fc1")
+        print(reshape.get_shape())
+        print(self.fc1_weights.get_shape())
         fc1 = tf.nn.relu(tf.matmul(reshape, self.fc1_weights) + self.fc1_biases)
+        print("Post fc1")
         # Add a 50% dropout during training only. Dropout also scales
         # activations such that no rescaling is needed at evaluation time.
         if train:
             fc1 = tf.nn.dropout(fc1, 0.5, seed=SEED)
+        print("Pre fc2")
         fc2 = tf.matmul(fc1, self.fc2_weights) + self.fc2_biases
+        print("Post fc2")
         return fc2
 
+    def get_empty_batchlist(num_total_files, num_files):
+        if( num_total_files - num_files >= BATCH_SIZE ):
+            return [ None for x in xrange(BATCH_SIZE) ]
+        else:
+            return [ None for x in xrange(num_total_files-num_files) ]
+
     def train(self):
-        # Visit the data directories
-        training_filenames = glob.glob(TRAINING_DIRECTORY).sort()
-        annotation_filenames = glob.glob(ANNOTATION_DIRECTORY).sort()
-        assert(len(training_filenames) == len(annotation_filenames))
-        train_size = len(training_filenames) - VALIDATION_SIZE
+        # Visit the annotation directories
+        print("Reading annotations.")
+        ann_frame = pd.read_csv(ANNOTATION_DIRECTORY + ANNOTATION_MAIN, sep=r' ')
+        ann_lookup = {}
+        for idx, img_num, center_x, center_y, angle, c1x, c1y, c2x, c2y, c3x, c3y, c4x, c4y, catagory, occluded, fully_included, in first_ann.itertuples():
+            if(img_num not in ann_lookup):
+                # Initialize the output to all background
+                ann_lookup[img_num] = numpy.zeros(shape=(OUTPUT_RESOLUTION,
+                                                         OUTPUT_RESOLUTION,
+                                                         NUM_LABELS),
+                                                  dtype=np_data_type())
+                ann_lookup[img_num][:,:,0] = 1.0
 
-        # Training computation: logits + cross-entropy loss.
-        logits = self.model(self.train_data_node, True)
-        loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
-            logits, self.train_labels_node))
+            # Reset the value at this point using 1-hot encoding
+            ann_lookup[img_num][center_x // OUTPUT_RESOLUTION,
+                                center_y // OUTPUT_RESOLUTION,
+                                0 ] = 0.0
+            # Currently only 1 non-background label is supported
+            # This is simple to change however
+            ann_lookup[img_num][center_x // OUTPUT_RESOLUTION,
+                                center_y // OUTPUT_RESOLUTION,
+                                1 ] = 1.0
+        with open(ANNOTATION_DIRECTORY + FOLDS[0],'r') as fold_file:
+            fold_filenames = [ x.strip() for x in foldfile.readlines() ]
 
-        # L2 regularization for the fully connected parameters.
-        regularizers = (tf.nn.l2_loss(self.fc1_weights) + tf.nn.l2_loss(self.fc1_biases) +
-                tf.nn.l2_loss(self.fc2_weights) + tf.nn.l2_loss(self.fc2_biases))
-        # Add the regularization term to the loss.
-        loss += 5e-4 * regularizers #TODO edit this
+        with open(ANNOTATION_DIRECTORY + FOLD_TESTS[0], 'r') as test_file:
+            test_filenames = [ x.strip() for x in test_filenames.readlines() ]
 
-        # Optimizer: set up a variable that's incremented once per batch and
-        # controls the learning rate decay.
-        batch = tf.Variable(0, dtype=data_type())
-        # Decay once per epoch, using an exponential schedule starting at 0.01.
-        learning_rate = tf.train.exponential_decay(
-                0.01,                # Base learning rate.
-                batch * BATCH_SIZE,  # Current index into the dataset.
-                train_size,          # Decay step.
-                0.95,                # Decay rate.
-                staircase=True)
-        # Use simple momentum for the optimization.
-        optimizer = tf.train.MomentumOptimizer(learning_rate,
-                0.9).minimize(loss,
-                        global_step=batch)
-
-                # Predictions for the current training minibatch.
-        train_prediction = tf.nn.softmax(logits)
-
-        # Predictions for the test and validation, which we'll compute less often.
-        eval_prediction = tf.nn.softmax(self.model(self.eval_data))
-
-        # Create a local session to run the training.
-        start_time = time.time()
         with tf.Session() as sess:
             # Run all the initializers to prepare the trainable parameters.
             tf.global_variables_initializer().run()
             print('Initialized!')
-        # Loop through training steps.
-        for step in xrange(int(NUM_EPOCHS * train_size) // BATCH_SIZE):
-            # Compute the offset of the current minibatch in the data.
-            # Note that we could use better randomization across epochs.
-            offset = (step * BATCH_SIZE) % (train_size - BATCH_SIZE)
+            num_batches = ceil(len(fold_filenames) / BATCH_SIZE)
+            num_images = 0
+            batch_ind = 0
+            batch_offset = 0
+            batch_list = [ None for x in xrange(BATCH_SIZE) ]
+            for fold_filename in fold_filenames:
+                if batch_offset == BATCH_SIZE:
+                    # Prepare training images
+                    batch_data = numpy.zeros((BATCH_SIZE,
+                                              IMAGE_SIZE,
+                                              IMAGE_SIZE,
+                                              NUM_CHANNELS))
+                    batch_labels = numpy.zeros((BATCH_SIZE,
+                                              OUTPUT_RESOLUTION,
+                                              OUTPUT_RESOLUTION,
+                                              NUM_LABELS))
+                    for in_filename_ind in xrange(len(batch_list)):
+                        with Image.open(batch_list[in_filename_ind]) as input_img:
+                            input_img.resize((IMAGE_SIZE, IMAGE_SIZE))
+                            batch_data[in_filename_ind, :, :, :] = numpy.array(input_img.getdata(),
+                                                                    ).reshape(input_img.size[1],
+                                                                    input_img.size[0], NUM_CHANNELS)
 
-            # Load the data and labels TODO
-            batch_data = training_filenames[offset:(offset + BATCH_SIZE), ...]
-            batch_labels = annotation_filenames[offset:(offset + BATCH_SIZE)]
+                        batch_labels[in_filename_ind, :, :, :] = ann_lookup[in_filename_ind]
 
-            # This dictionary maps the batch data (as a numpy array) to the
-            # node in the graph it should be fed to.
-            feed_dict = {self.train_data_node: batch_data,
-                        self.train_labels_node: batch_labels}
-            # Run the optimizer to update weights.
-            sess.run(optimizer, feed_dict=feed_dict)
-            # print some extra information once reach the evaluation frequency
-            if step % EVAL_FREQUENCY == 0:
-                # fetch some extra nodes' data
-                l, lr, predictions = sess.run([loss, learning_rate, train_prediction],
-                        feed_dict=feed_dict)
-                elapsed_time = time.time() - start_time
-                start_time = time.time()
-                print('Step %d (epoch %.2f), %.1f ms' %
-                    (step, float(step) * BATCH_SIZE / train_size,
-                        1000 * elapsed_time / EVAL_FREQUENCY))
-                print('Minibatch loss: %.3f, learning rate: %.6f' % (l, lr))
-                print('Minibatch error: %.1f%%' % error_rate(predictions, batch_labels))
-                print('Validation error: %.1f%%' % error_rate(
-                    self.eval_in_batches(validation_data, sess), validation_labels))
-                sys.stdout.flush()
+                    batch_data = (batch_data - (PIXEL_DEPTH / 2.0)) / PIXEL_DEPTH
+                    feed_dict = {self.train_data_node: batch_data,
+                                 self.train_labels_node: batch_labels}
+                    print("Batch {} loaded".format(batch_ind))
+                    # Run the optimizer to update weights.
+                    sess.run(self.optimizer, feed_dict=feed_dict)
+                    batch_ind += 1
+                    batch_offset = 0
+                    batch_list = [ None for x in xrange(BATCH_SIZE) ]
 
-    def eval_in_batches(self, data, sess):
-        """Get all predictions for a dataset by running it in small batches."""
-        # Small utility function to evaluate a dataset by feeding batches of data to
-        # {self.eval_data} and pulling the results from {eval_predictions}.
-        # Saves memory and enables this to run on smaller GPUs.
-        size = data.shape[0]
-        if size < EVAL_BATCH_SIZE:
-                raise ValueError("batch size for evals larger than dataset: %d" % size)
-        predictions = numpy.ndarray(shape=(size, NUM_LABELS), dtype=numpy.float32)
-        for begin in xrange(0, size, EVAL_BATCH_SIZE):
-            end = begin + EVAL_BATCH_SIZE
-        if end <= size:
-            predictions[begin:end, :] = sess.run(
-                    eval_prediction,
-                    feed_dict={self.eval_data: data[begin:end, ...]})
-        else:
-            batch_predictions = sess.run(
-                    eval_prediction, feed_dict={self.eval_data: data[-EVAL_BATCH_SIZE:, ...]})
-            predictions[begin:, :] = batch_predictions[begin - size:, :]
-        return predictions
+                batch_list[batch_offset] = fold_filename
+                num_images += 1
+                batch_offset += 1
 
 def main(_):
-    ann_frame = pd.read_csv(ANNOTATION_DIRECTORY + ANNOTATION_MAIN, sep=r' ')
-    for fold_num in xrange(len(FOLDS)):
-        # Start the fold
-        with open(ANNOTATION_DIRECTORY + FOLDS[fold_num]) as an_file:
-            fold_filenames = list(map(lambda x: x.strip(), an_file.readlines()))
-
-        num_batches = ceil(len(fold_filenames) / flaot(BATCH_SIZE))
-        num_images = 0
-        if len(fold_filenames) >= BATCH_SIZE:
-            batch_list = [ None for i in xrange(BATCH_SIZE) ]
-        else:
-            batch_list = [ None for i in xrange(len(fold_filenames)]
-        for fold_filename in fold_filenames:
-            if num_images >= BATCH_SIZE:
-                batch_ind += 1
-            filename_list[batch_ind].append
-            num_images += 1
-            training_img = Image.read(TRAINING_DIRECTORY + fold_filename + IMG_EXT)
-            training_img.resize((IMAGE_SIZE, IMAGE_SIZE))
-            training_array = numpy.array(training_img.getdata(),
-                    numpy.uint8).reshape(training_img.size[1], training_img.size[0], 3)
-            image_list[batch_ind].append(training_array)
-            num_images += 1
+    mcnn = MnihCNN()
+    mcnn.train()
 
 
 # test_error = error_rate(eval_in_batches(test_data, sess), test_labels) FIXME
